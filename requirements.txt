@@ -1,4 +1,8 @@
-flask
-requests
+setuptools
+python-multipart
+fastapi
+uvicorn[standard]
+httpx
 openai
 redis
+python-dotenv

@@ -1,4 +1,6 @@
 /__pycache__
 /venv
 bot.log
-config.py
+report.txt
+.env.local
+.env.prod

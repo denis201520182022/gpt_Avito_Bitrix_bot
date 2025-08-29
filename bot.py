@@ -1,99 +1,142 @@
-from flask import Flask, request, jsonify
-import requests
+from fastapi import FastAPI, Form
+from fastapi.responses import JSONResponse
+import httpx
+import asyncio
 from openai import OpenAI
-import redis
+import redis.asyncio as aioredis
 import json
 import config
 import logging
 
-# Настройка логирования
+# ----------------- Логирование -----------------
 logging.basicConfig(
-    filename="bot.log",
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
     encoding="utf-8"
 )
 
-# Подключение к Redis
-r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
-app = Flask(__name__)
+# ----------------- FastAPI -----------------
+app = FastAPI()
 
-# Инициализация OpenAI клиента
-client = OpenAI(api_key=config.OPENAI_API_KEY)
+# ----------------- Redis -----------------
+redis_client = None
 
+async def get_redis():
+    global redis_client
+    if redis_client is None:
+        redis_client = aioredis.Redis(
+            host='redis', port=6379, db=0, decode_responses=True
+        )
 
-def get_dialog_history(dialog_id):
-    """Получаем историю диалога из Redis"""
-    history_json = r.get(f"dialog:{dialog_id}")
+    return redis_client
+
+async def get_dialog_history(dialog_id: str):
+    r = await get_redis()
+    history_json = await r.get(f"dialog:{dialog_id}")
     if history_json:
         return json.loads(history_json)
     return []
 
-def save_dialog_history(dialog_id, messages):
-    """Сохраняем историю диалога в Redis"""
-    r.set(f"dialog:{dialog_id}", json.dumps(messages))
+async def save_dialog_history(dialog_id: str, messages):
+    r = await get_redis()
+    await r.set(f"dialog:{dialog_id}", json.dumps(messages))
 
+# ----------------- OpenAI -----------------
+client = OpenAI(api_key=config.OPENAI_API_KEY)
 
-@app.route("/bot", methods=["POST"])
-def bot_handler():
-    data = request.form.to_dict()  # Битрикс шлёт form-data
-    logging.info(f"RAW DATA: {data}")
+# ----------------- Ограничение истории -----------------
+MAX_HISTORY_PAIRS = 50  # лимит пар сообщений: пользователь → бот
 
-    # Извлекаем данные
-    user_message = data.get("data[PARAMS][MESSAGE]")
-    dialog_id = data.get("data[PARAMS][DIALOG_ID]")
-    user_name = data.get("data[USER][FIRST_NAME]", "клиент")  # имя пользователя для подстановки
+# ----------------- Обработчик сообщений -----------------
+@app.post("/bot")
+async def bot_handler(
+    event: str = Form(...),
+    dialog_id: str = Form(..., alias="data[PARAMS][DIALOG_ID]"),
+    user_message: str = Form(..., alias="data[PARAMS][MESSAGE]"),
+    user_name: str = Form("клиент", alias="data[USER][FIRST_NAME]"),
+):
+    logging.info(f"RAW DATA: event={event}, dialog_id={dialog_id}, message={user_message}")
 
-    if not user_message or not dialog_id:
-        return jsonify({"status": "no message"})
+    # ----------------- Задержка -----------------
+    await asyncio.sleep(30)  # 30 секунд
 
-    # Подставляем имя пользователя в промт
+    # ----------------- Фильтрация пустых сообщений -----------------
+    if not user_message.strip():
+        logging.info(f"[Диалог {dialog_id}] Пустое сообщение, ответ не генерируем")
+        return JSONResponse({"status": "ok"})
+
     system_prompt = config.PROMPT.replace("{имя}", user_name)
+    dialog_history = await get_dialog_history(dialog_id)
 
-    # Получаем историю переписки
-    dialog_history = get_dialog_history(dialog_id)
-
-    # Добавляем новое сообщение пользователя
+    # Добавляем сообщение пользователя
     dialog_history.append({"role": "user", "content": user_message})
 
-    # Формируем сообщения для OpenAI: системное + история
+    # Ограничиваем историю последними MAX_HISTORY_PAIRS парами
+    max_messages = MAX_HISTORY_PAIRS * 2
+    if len(dialog_history) > max_messages:
+        dialog_history = dialog_history[-max_messages:]
+
     messages_for_gpt = [{"role": "system", "content": system_prompt}] + dialog_history
 
-    # GPT ответ
-    response = client.chat.completions.create(
-        model=config.GPT_MODEL,
-        messages=messages_for_gpt
-    )
-    answer = response.choices[0].message.content
+    # ----------------- OpenAI с повторной отправкой -----------------
+    answer = None
+    start_time = asyncio.get_event_loop().time()
+    while answer is None and (asyncio.get_event_loop().time() - start_time < 300):  # 5 минут
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: client.chat.completions.create(
+                        model=config.GPT_MODEL,
+                        messages=messages_for_gpt
+                    )
+                ),
+                timeout=20.0
+            )
+            answer = response.choices[0].message.content
+        except asyncio.TimeoutError:
+            logging.error(f"[Диалог {dialog_id}] OpenAI timeout, повторная попытка...")
+            await asyncio.sleep(2)
+        except Exception as e:
+            logging.error(f"[Диалог {dialog_id}] OpenAI error: {e}, повторная попытка...")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    logging.error(f"[Диалог {dialog_id}] OpenAI response: {e.response.text}")
+                except Exception:
+                    pass
+            await asyncio.sleep(2)
 
-    # Добавляем ответ бота в историю
+    if answer is None:
+        answer = "Скоро вернусь к вам с ответом"
+        logging.error(f"[Диалог {dialog_id}] Не удалось получить ответ от OpenAI за 5 минут")
+
     dialog_history.append({"role": "assistant", "content": answer})
-    save_dialog_history(dialog_id, dialog_history)
 
-    # Лог в консоль и в файл
-    print(f"[Диалог {dialog_id}] Пользователь: {user_message}")
-    print(f"[Диалог {dialog_id}] Бот: {answer}")
+    # Снова обрезаем историю после добавления ответа
+    if len(dialog_history) > max_messages:
+        dialog_history = dialog_history[-max_messages:]
+    await save_dialog_history(dialog_id, dialog_history)
+    
+
+    
+
     logging.info(f"[Диалог {dialog_id}] Пользователь: {user_message}")
     logging.info(f"[Диалог {dialog_id}] Бот: {answer}")
 
-    # Отправка ответа в Битрикс24
-    resp = requests.post(
-        config.BITRIX_WEBHOOK + "imbot.message.add.json",
-        data={
-            "DIALOG_ID": dialog_id,
-            "MESSAGE": answer,
-            "BOT_ID": config.BOT_ID,
-            "CLIENT_ID": config.CLIENT_ID
-        }
-    )
+    # ----------------- Bitrix -----------------
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client_http:
+            resp = await client_http.post(
+                config.BITRIX_WEBHOOK + "imbot.message.add.json",
+                data={
+                    "DIALOG_ID": dialog_id,
+                    "MESSAGE": answer,
+                    "BOT_ID": config.BOT_ID,
+                    "CLIENT_ID": config.CLIENT_ID
+                }
+            )
+            logging.info(f"Bitrix response: {resp.status_code} {resp.text}")
+    except Exception as e:
+        logging.error(f"Bitrix request error: {e}")
 
-    # Логируем ответ от Bitrix
-    logging.info(f"Bitrix response: {resp.status_code} {resp.text}")
-    print(f"Bitrix response: {resp.status_code} {resp.text}")
-
-    return jsonify({"status": "ok"})
-
-
-if __name__ == "__main__":
-    app.run(port=5000)
+    return JSONResponse({"status": "ok"})
