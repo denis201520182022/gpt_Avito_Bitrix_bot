@@ -1,9 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-# Определяем какое окружение загружать
-env_file = ".env.prod" if os.getenv("APP_ENV") == "prod" else ".env.local"
-load_dotenv(env_file)
+load_dotenv(".env.prod")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK")
