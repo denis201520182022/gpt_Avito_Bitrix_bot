@@ -9,7 +9,7 @@ import config
 import logging
 from logging.handlers import RotatingFileHandler
 
-file_handler = RotatingFileHandler("bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+file_handler = RotatingFileHandler("/app/logs/bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,7 +111,7 @@ async def dialog_worker(dialog_id: str, user_name: str):
                     await asyncio.sleep(1)
 
             if answer is None:
-                answer = "Извините, я временно недоступен."
+                answer = "Скоро вернусь к вам с ответом"
 
             dialog_history.append({"role": "assistant", "content": answer})
             if len(dialog_history) > max_messages:

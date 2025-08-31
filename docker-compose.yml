@@ -11,6 +11,10 @@ services:
       - .env.prod
     depends_on:
       - redis
+    volumes:
+      - ./logs:/app/logs
+
+
     
 
   redis:
