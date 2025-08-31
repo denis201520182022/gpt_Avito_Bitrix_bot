@@ -8,9 +8,17 @@ import json
 import config
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 
-file_handler = RotatingFileHandler("/app/logs/bot.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+log_dir = os.path.join(os.getcwd(), "logs")
+os.makedirs(log_dir, exist_ok=True)
 
+file_handler = RotatingFileHandler(
+    os.path.join(log_dir, "bot.log"),
+    maxBytes=5_000_000,
+    backupCount=3,
+    encoding="utf-8"
+)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -27,8 +35,12 @@ async def get_redis():
     global redis_client
     if redis_client is None:
         redis_client = aioredis.Redis(
-            host="redis", port=6379, db=0, decode_responses=True
-        )
+            host=config.REDIS_HOST,  # в .env: REDIS_HOST=127.0.0.1
+            port=int(config.REDIS_PORT),  # в .env: REDIS_PORT=6379
+            db=0,
+            decode_responses=True
+)
+
     return redis_client
 
 # ----------------- История -----------------
