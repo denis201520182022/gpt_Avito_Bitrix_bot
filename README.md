@@ -192,4 +192,23 @@ redis-cli flushall # очистить все базы
 3. Проверьте конфигурацию в `.env.prod`
 4. Убедитесь в доступности внешних API (OpenAI, Bitrix24) и прокси
 
+
+Если что то менялось:
+1. Сохранить изменения в файлах
+2. Узнать имя службы:
+                ```bash
+        systemctl list-units --type=service
+
+        ```
+3. Перезапустить службу:
+               ```bash
+               sudo systemctl restart avito-bot.service
+
+        ```
+4. Проверить статус:
+              ```bash
+              sudo systemctl status avito-bot.service
+
+
+        ```
 ---
