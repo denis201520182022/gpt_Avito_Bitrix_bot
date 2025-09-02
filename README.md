@@ -196,19 +196,15 @@ redis-cli flushall # очистить все базы
 Если что то менялось:
 1. Сохранить изменения в файлах
 2. Узнать имя службы:
-                ```bash
-        systemctl list-units --type=service
-
-        ```
+            ```bash
+            systemctl list-units --type=service
+            ```
 3. Перезапустить службу:
-               ```bash
-               sudo systemctl restart avito-bot.service
-
-        ```
+            ```bash
+            sudo systemctl restart avito-bot.service
+            ```
 4. Проверить статус:
-              ```bash
-              sudo systemctl status avito-bot.service
-
-
-        ```
+            ```bash
+            sudo systemctl status avito-bot.service
+            ```
 ---
