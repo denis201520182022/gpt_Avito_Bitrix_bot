@@ -56,7 +56,10 @@ async def save_dialog_history(dialog_id: str, messages):
     await r.set(f"dialog:{dialog_id}", json.dumps(messages))
 
 # ----------------- OpenAI -----------------
-client = OpenAI(api_key=config.OPENAI_API_KEY)
+client = OpenAI(
+    api_key=config.OPENAI_API_KEY,
+    base_url=config.PROXY_SERVICE_URL
+)
 
 # ----------------- Ограничение истории -----------------
 MAX_HISTORY_PAIRS = 50  # лимит пар пользователь→бот

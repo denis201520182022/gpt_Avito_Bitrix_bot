@@ -12,6 +12,8 @@ GPT_MODEL = os.getenv("GPT_MODEL", "gpt-4o-mini")
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
+# Добавляем прокси URL
+PROXY_SERVICE_URL = os.getenv("PROXY_SERVICE_URL")
 
 # PROMPT можно хранить прямо в .env или в файле
 PROMPT_FILE = os.getenv("PROMPT_FILE")
