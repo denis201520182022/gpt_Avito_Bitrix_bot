@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(".env.prod")
+load_dotenv(".env.local")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK")
@@ -20,3 +20,17 @@ PROMPT_FILE = os.getenv("PROMPT_FILE")
 
 with open(PROMPT_FILE, "r", encoding="utf-8") as f:
     PROMPT = f.read()
+
+
+# Настройки обработки сообщений
+MESSAGE_COLLECTION_WINDOW = float(os.getenv("MESSAGE_COLLECTION_WINDOW", "20.0"))  # секунды
+MAX_COLLECTION_WINDOW = float(os.getenv("MAX_COLLECTION_WINDOW", "60.0"))        # секунды
+MESSAGE_CHECK_INTERVAL = float(os.getenv("MESSAGE_CHECK_INTERVAL", "0.5"))       # секунды
+
+# Настройки OpenAI
+OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "30"))                          # секунды
+OPENAI_RETRIES = int(os.getenv("OPENAI_RETRIES", "3"))                          # попытки
+
+# Настройки поведения
+COMBINE_MULTIPLE_MESSAGES = os.getenv("COMBINE_MULTIPLE_MESSAGES", "true").lower() == "true"
+HUMANIZE_MODE = os.getenv("HUMANIZE_MODE", "true").lower() == "true"
