@@ -12,6 +12,7 @@ import os
 import time
 from typing import Dict
 import random
+import re
 
 log_dir = os.path.join(os.getcwd(), "logs")
 os.makedirs(log_dir, exist_ok=True)
@@ -73,12 +74,124 @@ OPENAI_RETRIES = getattr(config, "OPENAI_RETRIES")
 COMBINE_MULTIPLE_MESSAGES = getattr(config, "COMBINE_MULTIPLE_MESSAGES")
 HUMANIZE_MODE = getattr(config, "HUMANIZE_MODE")
 
+# Новые константы для работы с операторами
+OPERATOR_ID = getattr(config, "OPERATOR_ID", None)  # ID конкретного оператора
+PHONE_RESPONSE = getattr(config, "PHONE_RESPONSE", "Спасибо за предоставленный номер телефона! Передаю ваш запрос специалисту.")
+
+# ----------------- Утилиты для проверки контента -----------------
+def has_phone_number(text: str) -> bool:
+    """Проверяет наличие номера телефона в тексте"""
+    if not text or not isinstance(text, str):
+        return False
+    
+    # Различные форматы российских номеров
+    phone_patterns = [
+        r'\+7\s*\(?[0-9]{3}\)?\s*[0-9]{3}[\s-]?[0-9]{2}[\s-]?[0-9]{2}',  # +7(xxx)xxx-xx-xx
+        r'8\s*\(?[0-9]{3}\)?\s*[0-9]{3}[\s-]?[0-9]{2}[\s-]?[0-9]{2}',     # 8(xxx)xxx-xx-xx
+        r'[0-9]{11}',                                                       # 11 цифр подряд
+        r'[0-9]{10}',                                                       # 10 цифр подряд
+        r'\+7[0-9]{10}',                                                    # +7 и 10 цифр
+    ]
+    
+    for pattern in phone_patterns:
+        if re.search(pattern, text):
+            logging.info(f"Найден номер телефона по шаблону: {pattern}")
+            return True
+    
+    return False
+
+def is_non_text_message(message_type: str = None, message: str = None) -> bool:
+    """Проверяет, является ли сообщение не текстовым (фото, файл и т.д.)"""
+    # Если есть тип сообщения и он не текстовый
+    if message_type and message_type.lower() not in ['text', 'message']:
+        return True
+    
+    # Если сообщение пустое или None
+    if not message or not message.strip():
+        return True
+    
+    return False
+
+# ----------------- Перевод на оператора -----------------
+async def transfer_to_operator(dialog_id: str, reason: str = "auto"):
+    """Переводит диалог на оператора через Bitrix24 API"""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client_http:
+            # Используем imopenlines.bot.session.operator для перевода на любого доступного оператора
+            # или imopenlines.bot.session.transfer для перевода на конкретного оператора
+            
+            if OPERATOR_ID:
+                # Перевод на конкретного оператора
+                method = "imopenlines.bot.session.transfer"
+                params = {
+                    "DIALOG_ID": dialog_id,
+                    "OPERATOR_ID": OPERATOR_ID
+                }
+            else:
+                # Перевод на любого доступного оператора
+                method = "imopenlines.bot.session.operator"
+                params = {
+                    "DIALOG_ID": dialog_id
+                }
+            
+            resp = await client_http.post(
+                config.BITRIX_WEBHOOK + f"{method}.json",
+                data=params
+            )
+            
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("result"):
+                    logging.info(f"[Диалог {dialog_id}] Успешно переведен на оператора. Причина: {reason}")
+                    return True
+                else:
+                    logging.warning(f"[Диалог {dialog_id}] Ошибка перевода на оператора: {result}")
+                    return False
+            else:
+                logging.warning(f"[Диалог {dialog_id}] HTTP ошибка при переводе: {resp.status_code} - {resp.text[:200]}")
+                return False
+                
+    except Exception as e:
+        logging.error(f"[Диалог {dialog_id}] Исключение при переводе на оператора: {e}", exc_info=True)
+        return False
+
+async def schedule_transfer(dialog_id: str):
+    """
+    Создает отложенную задачу на перевод диалога на оператора.
+    """
+    delay_seconds = 30 * 60  # 30 минут
+    try:
+        logging.info(f"[Диалог {dialog_id}] Запланирован отложенный перевод через {delay_seconds} секунд.")
+        await asyncio.sleep(delay_seconds)
+        
+        # Проверка, не был ли диалог уже переведен вручную или по другой причине
+        # (опционально, но полезно)
+        # Здесь можно добавить логику проверки текущего статуса диалога
+        
+        transfer_success = await transfer_to_operator(dialog_id, "delayed_transfer")
+        if transfer_success:
+            logging.info(f"[Диалог {dialog_id}] Отложенный перевод на оператора успешно выполнен.")
+        else:
+            logging.warning(f"[Диалог {dialog_id}] Отложенный перевод не удался.")
+            
+    except asyncio.CancelledError:
+        logging.info(f"[Диалог {dialog_id}] Отложенная задача на перевод была отменена.")
+    except Exception as e:
+        logging.error(f"[Диалог {dialog_id}] Критическая ошибка в задаче отложенного перевода: {e}", exc_info=True)
+    finally:
+        async with transfer_tasks_lock:
+            transfer_tasks.pop(dialog_id, None)
+
+
 # ----------------- Воркеры с защитой от ошибок -----------------
 workers = {}
 workers_lock = asyncio.Lock()
 worker_creation_locks: Dict[str, asyncio.Lock] = {}
 WORKER_TIMEOUT = 300
 MAX_CONSECUTIVE_ERRORS = 5
+# ----------------- Отложенные переводы -----------------
+transfer_tasks = {}
+transfer_tasks_lock = asyncio.Lock()
 
 # ---- Lua-скрипт для атомарного забора и очистки ----
 FETCH_AND_CLEAR = """
@@ -135,7 +248,7 @@ async def dialog_worker(dialog_id: str, user_name: str):
                     if elapsed_since_last >= MESSAGE_COLLECTION_WINDOW or elapsed_total >= MAX_COLLECTION_WINDOW:
                         break
 
-                # Обработка GPT и отправка (с защитой от ошибок)
+                # Обработка сообщений с проверкой на специальные случаи
                 await process_messages_safely(dialog_id, user_name, current_batch_user_messages, r)
 
             except asyncio.CancelledError:
@@ -167,47 +280,30 @@ async def dialog_worker(dialog_id: str, user_name: str):
 
 async def process_messages_safely(dialog_id: str, user_name: str, messages: list, redis_client):
     """
-    Безопасная обработка сообщений с изолированной обработкой ошибок
+    Безопасная обработка сообщений с проверкой специальных случаев
     """
     try:
-        # Получение и обновление истории
-        dialog_history = await get_dialog_history(dialog_id)
+        # Проверяем каждое сообщение на наличие номера телефона
+        has_phone = any(has_phone_number(msg) for msg in messages)
         
-        if len(messages) == 1:
-            dialog_history.append({"role": "user", "content": messages[0]})
-        else:
-            if COMBINE_MULTIPLE_MESSAGES:
-                combined = "\n".join([f"{i+1}. {msg}" for i, msg in enumerate(messages)])
-                dialog_history.append({"role": "user", "content": combined})
-                logging.info(f"[Диалог {dialog_id}] Объединяем {len(messages)} сообщений в одно")
-            else:
-                for m in messages:
-                    dialog_history.append({"role": "user", "content": m})
-                logging.info(f"[Диалог {dialog_id}] Добавляем {len(messages)} сообщений отдельно")
+        if has_phone:
+            logging.info(f"[Диалог {dialog_id}] Обнаружен номер телефона, отправляем ответ и планируем перевод.")
+            
+            # Планируем отложенный перевод на оператора
+            async with transfer_tasks_lock:
+                if dialog_id not in transfer_tasks or transfer_tasks[dialog_id].done():
+                    logging.info(f"[Диалог {dialog_id}] Создаем новую задачу отложенного перевода.")
+                    transfer_tasks[dialog_id] = asyncio.create_task(schedule_transfer(dialog_id))
+                else:
+                    logging.info(f"[Диалог {dialog_id}] Отложенный перевод уже запланирован. Пропускаем.")
+            
+            # Продолжаем обработку как обычное сообщение, но без немедленного перевода
+            # (эта часть логики уже есть, но для ясности ее оставляем)
+            await process_normal_messages(dialog_id, user_name, messages, redis_client)
+            return
 
-        max_messages = MAX_HISTORY_PAIRS * 2
-        if len(dialog_history) > max_messages:
-            dialog_history = dialog_history[-max_messages:]
-
-        system_prompt = config.PROMPT.replace("{имя}", user_name)
-        messages_for_gpt = [{"role": "system", "content": system_prompt}] + dialog_history
-
-        # GPT запрос с повторами
-        answer = await get_gpt_response_with_retries(dialog_id, messages_for_gpt)
-        
-        if answer is None:
-            answer = "Извините, сейчас у меня технические трудности. Попробуйте повторить запрос."
-
-        # Сохранение истории
-        dialog_history.append({"role": "assistant", "content": answer})
-        if len(dialog_history) > max_messages:
-            dialog_history = dialog_history[-max_messages:]
-        await save_dialog_history(dialog_id, dialog_history)
-
-        # Отправка в Bitrix
-        await send_to_bitrix_safely(dialog_id, answer)
-        
-        logging.info(f"[Диалог {dialog_id}] Сообщения обработаны успешно")
+        # Обычная обработка сообщений
+        await process_normal_messages(dialog_id, user_name, messages, redis_client)
         
     except Exception as e:
         logging.error(f"[Диалог {dialog_id}] Ошибка при обработке сообщений: {e}", exc_info=True)
@@ -219,6 +315,50 @@ async def process_messages_safely(dialog_id: str, user_name: str, messages: list
         except Exception as return_error:
             logging.error(f"[Диалог {dialog_id}] Ошибка при возврате сообщений в очередь: {return_error}")
         raise
+
+
+async def process_normal_messages(dialog_id: str, user_name: str, messages: list, redis_client):
+    """
+    Обработка обычных текстовых сообщений через GPT
+    """
+    # Получение и обновление истории
+    dialog_history = await get_dialog_history(dialog_id)
+    
+    if len(messages) == 1:
+        dialog_history.append({"role": "user", "content": messages[0]})
+    else:
+        if COMBINE_MULTIPLE_MESSAGES:
+            combined = "\n".join([f"{i+1}. {msg}" for i, msg in enumerate(messages)])
+            dialog_history.append({"role": "user", "content": combined})
+            logging.info(f"[Диалог {dialog_id}] Объединяем {len(messages)} сообщений в одно")
+        else:
+            for m in messages:
+                dialog_history.append({"role": "user", "content": m})
+            logging.info(f"[Диалог {dialog_id}] Добавляем {len(messages)} сообщений отдельно")
+
+    max_messages = MAX_HISTORY_PAIRS * 2
+    if len(dialog_history) > max_messages:
+        dialog_history = dialog_history[-max_messages:]
+
+    system_prompt = config.PROMPT.replace("{имя}", user_name)
+    messages_for_gpt = [{"role": "system", "content": system_prompt}] + dialog_history
+
+    # GPT запрос с повторами
+    answer = await get_gpt_response_with_retries(dialog_id, messages_for_gpt)
+    
+    if answer is None:
+        answer = "Извините, сейчас у меня технические трудности. Попробуйте повторить запрос."
+
+    # Сохранение истории
+    dialog_history.append({"role": "assistant", "content": answer})
+    if len(dialog_history) > max_messages:
+        dialog_history = dialog_history[-max_messages:]
+    await save_dialog_history(dialog_id, dialog_history)
+
+    # Отправка в Bitrix
+    await send_to_bitrix_safely(dialog_id, answer)
+    
+    logging.info(f"[Диалог {dialog_id}] Сообщения обработаны успешно")
 
 async def get_gpt_response_with_retries(dialog_id: str, messages_for_gpt: list) -> str:
     """Получение ответа GPT с повторными попытками"""
@@ -336,6 +476,7 @@ async def bot_handler(
     dialog_id: str = Form(None, alias="data[PARAMS][DIALOG_ID]"),
     user_message: str = Form(None, alias="data[PARAMS][MESSAGE]"),
     user_name: str = Form("клиент", alias="data[USER][FIRST_NAME]"),
+    message_type: str = Form(None, alias="data[PARAMS][MESSAGE_TYPE]"),
 ):
     try:
         # fallback на JSON
@@ -343,20 +484,33 @@ async def bot_handler(
             try:
                 data = await request.json()
                 event = data.get("event", event)
-                dialog_id = data.get("data", {}).get("PARAMS", {}).get("DIALOG_ID", dialog_id)
-                user_message = data.get("data", {}).get("PARAMS", {}).get("MESSAGE", user_message)
+                dialog_params = data.get("data", {}).get("PARAMS", {})
+                dialog_id = dialog_params.get("DIALOG_ID", dialog_id)
+                user_message = dialog_params.get("MESSAGE", user_message)
+                message_type = dialog_params.get("MESSAGE_TYPE", message_type)
                 user_name = data.get("data", {}).get("USER", {}).get("FIRST_NAME", user_name)
             except Exception as json_error:
                 logging.warning(f"Ошибка парсинга JSON: {json_error}")
 
-        logging.info(f"RAW: event={event}, dialog_id={dialog_id}, msg={user_message}")
-
-        if not user_message or not user_message.strip():
-            return JSONResponse({"status": "ok"})
+        logging.info(f"RAW: event={event}, dialog_id={dialog_id}, msg={user_message}, type={message_type}")
 
         if not dialog_id:
             logging.error("Нет dialog_id в запросе")
             return JSONResponse({"status": "error", "message": "Missing dialog_id"}, status_code=400)
+
+        # Проверка на нетекстовое сообщение (фото, файл и т.д.)
+        if is_non_text_message(message_type, user_message):
+            logging.info(f"[Диалог {dialog_id}] Получено нетекстовое сообщение, переводим на оператора")
+            transfer_success = await transfer_to_operator(dialog_id, "non_text_message")
+            
+            if transfer_success:
+                return JSONResponse({"status": "transferred_to_operator"})
+            else:
+                logging.warning(f"[Диалог {dialog_id}] Не удалось перевести на оператора")
+                return JSONResponse({"status": "transfer_failed"})
+
+        if not user_message or not user_message.strip():
+            return JSONResponse({"status": "ok"})
 
         # Добавление сообщения в очередь
         r = await get_redis()
@@ -396,12 +550,40 @@ async def status():
         "dialogs": list(workers.keys())
     }
 
-# ---- graceful shutdown всех воркеров ----
+# ---- Эндпоинт для ручного перевода на оператора ----
+@app.post("/transfer_to_operator")
+async def manual_transfer_to_operator(dialog_id: str):
+    """Ручной перевод диалога на оператора"""
+    try:
+        transfer_success = await transfer_to_operator(dialog_id, "manual")
+        if transfer_success:
+            return JSONResponse({"status": "success", "message": "Dialog transferred to operator"})
+        else:
+            return JSONResponse({"status": "error", "message": "Failed to transfer dialog"})
+    except Exception as e:
+        logging.error(f"Ошибка при ручном переводе диалога {dialog_id}: {e}", exc_info=True)
+        return JSONResponse({"status": "error", "message": "Internal server error"}, status_code=500)
+
+# ---- graceful shutdown всех воркеров и задач ----
 @app.on_event("shutdown")
 async def shutdown_workers():
-    logging.info("Закрытие всех воркеров...")
-    tasks_to_cancel = []
+    logging.info("Закрытие всех воркеров и отложенных переводов...")
     
+    # Отменяем все отложенные переводы
+    async with transfer_tasks_lock:
+        transfer_tasks_to_cancel = list(transfer_tasks.values())
+        transfer_tasks.clear()
+    
+    for task in transfer_tasks_to_cancel:
+        if not task.done():
+            task.cancel()
+    
+    if transfer_tasks_to_cancel:
+        await asyncio.gather(*transfer_tasks_to_cancel, return_exceptions=True)
+        logging.info(f"Отменено {len(transfer_tasks_to_cancel)} отложенных переводов")
+    
+    # Отменяем все воркеры
+    tasks_to_cancel = []
     for dialog_id, task in workers.items():
         if not task.done():
             logging.info(f"Отменяем воркер для диалога {dialog_id}")
@@ -411,7 +593,7 @@ async def shutdown_workers():
     if tasks_to_cancel:
         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
     
-    logging.info("Все воркеры завершены.")
+    logging.info("Все воркеры и задачи завершены.")
 
 # ---- graceful shutdown Redis ----
 @app.on_event("shutdown")

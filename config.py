@@ -34,3 +34,10 @@ OPENAI_RETRIES = int(os.getenv("OPENAI_RETRIES", "3"))                          
 # Настройки поведения
 COMBINE_MULTIPLE_MESSAGES = os.getenv("COMBINE_MULTIPLE_MESSAGES", "true").lower() == "true"
 HUMANIZE_MODE = os.getenv("HUMANIZE_MODE", "true").lower() == "true"
+
+# ID конкретного оператора (если нужно переводить на конкретного)
+OPERATOR_ID = "123"  # или None для любого доступного
+
+PHONE_TRANSFER_DELAY = 1800
+# Ответ при обнаружении телефона
+PHONE_RESPONSE = ""
