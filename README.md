@@ -116,7 +116,7 @@ uvicorn bot:app --host 0.0.0.0 --port 8000 --workers 2
 
 1. Создайте чат-бота в Bitrix24
 2. Получите `BOT_ID` и `CLIENT_ID` 
-3. Настройте вебхук для получения сообщений, указав URL: `http://your-server:8000/bot`
+3. Настройте вебхук для получения сообщений, указав URL: `http://your-server:8000/bot`  http://212.193.26.118:8000/bot
 
 ### Настройка Авито
 
@@ -208,3 +208,5 @@ redis-cli flushall # очистить все базы
             sudo systemctl status avito-bot.service
             ```
 ---
+
+

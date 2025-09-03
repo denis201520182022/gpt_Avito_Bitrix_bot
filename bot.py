@@ -99,32 +99,40 @@ def has_phone_number(text: str) -> bool:
 
 # Функции для работы с Bitrix и GPT
 async def transfer_to_operator(dialog_id: str, reason: str = "auto"):
-    # (ваш код функции transfer_to_operator без изменений)
     try:
+        logging.info(f"[Диалог {dialog_id}] Инициирован перевод на оператора. Причина: {reason}")
         async with httpx.AsyncClient(timeout=20.0) as client_http:
-            if OPERATOR_ID:
-                method = "imopenlines.bot.session.transfer"
-                params = {"DIALOG_ID": dialog_id, "OPERATOR_ID": OPERATOR_ID}
-            else:
-                method = "imopenlines.bot.session.operator"
-                params = {"DIALOG_ID": dialog_id}
             
+            # Удаляем префикс 'chat' и получаем только числовой ID
+            clean_chat_id = dialog_id.lstrip('chat')
+            
+            method = "imopenlines.bot.session.transfer"
+            params = {
+                "CHAT_ID": clean_chat_id,
+                "USER_ID": config.OPERATOR_ID,
+                "LEAVE": "Y"
+            }
+            
+            logging.info(f"[Диалог {dialog_id}] Отправляем в Bitrix метод: {method}, данные: {params}")
+
             resp = await client_http.post(config.BITRIX_WEBHOOK + f"{method}.json", data=params)
             
             if resp.status_code == 200:
                 result = resp.json()
                 if result.get("result"):
-                    logging.info(f"[Диалог {dialog_id}] Успешно переведен на оператора. Причина: {reason}")
+                    logging.info(f"[Диалог {dialog_id}] Успешно переведен на оператора.")
                     return True
                 else:
-                    logging.warning(f"[Диалог {dialog_id}] Ошибка перевода на оператора: {result}")
+                    logging.warning(f"[Диалог {dialog_id}] Ошибка перевода: {result}")
                     return False
             else:
-                logging.warning(f"[Диалог {dialog_id}] HTTP ошибка при переводе: {resp.status_code} - {resp.text[:200]}")
+                logging.warning(f"[Диалог {dialog_id}] HTTP ошибка: {resp.status_code} - {resp.text[:200]}")
                 return False
+                
     except Exception as e:
-        logging.error(f"[Диалог {dialog_id}] Исключение при переводе на оператора: {e}", exc_info=True)
+        logging.error(f"[Диалог {dialog_id}] Исключение при переводе: {e}", exc_info=True)
         return False
+    
 
 async def get_dialog_history(dialog_id: str):
     r = await get_redis()
@@ -290,7 +298,7 @@ async def process_messages_safely(dialog_id: str, user_name: str, messages: list
         messages_for_gpt = [{"role": "system", "content": system_prompt}] + dialog_history
         answer = await get_gpt_response_with_retries(dialog_id, messages_for_gpt)
         if answer is None:
-            answer = "Извините, сейчас у меня технические трудности. Попробуйте повторить запрос."
+            answer = "Ответим вам в ближайщее время"
         dialog_history.append({"role": "assistant", "content": answer})
         if len(dialog_history) > max_messages:
             dialog_history = dialog_history[-max_messages:]
@@ -356,14 +364,10 @@ async def bot_handler(
             logging.error("Нет dialog_id в запросе")
             return JSONResponse({"status": "error", "message": "Missing dialog_id"}, status_code=400)
 
-        # ФИЛЬТР 1: Игнорируем пустое сообщение
-        if not user_message or not user_message.strip():
-            return JSONResponse({"status": "ok", "message": "Empty message"})
-
-        # ФИЛЬТР 2: Немедленный перевод для файлов/фото
-        if message_type and message_type.upper() in ['FILE', 'ATTACH', 'STICKER', 'AUDIO', 'VIDEO']:
-            logging.info(f"[Диалог {dialog_id}] Получено нетекстовое сообщение типа {message_type}, переводим на оператора.")
-            transfer_success = await transfer_to_operator(dialog_id, "non_text_message")
+        # Новый фильтр: если сообщение пустое и событие - ONIMBOTMESSAGEADD → переводим на оператора
+        if event == "ONIMBOTMESSAGEADD" and (not user_message or not user_message.strip()):
+            logging.info(f"[Диалог {dialog_id}] Получено пустое сообщение (ONIMBOTMESSAGEADD), переводим на оператора.")
+            transfer_success = await transfer_to_operator(dialog_id, "empty_message")
             if transfer_success:
                 return JSONResponse({"status": "transferred_to_operator"})
             else:
