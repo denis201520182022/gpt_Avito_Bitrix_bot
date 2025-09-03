@@ -36,8 +36,6 @@ COMBINE_MULTIPLE_MESSAGES = os.getenv("COMBINE_MULTIPLE_MESSAGES", "true").lower
 HUMANIZE_MODE = os.getenv("HUMANIZE_MODE", "true").lower() == "true"
 
 # ID конкретного оператора (если нужно переводить на конкретного)
-OPERATOR_ID = "123"  # или None для любого доступного
+OPERATOR_ID = "22"  # или None для любого доступного
 
 PHONE_TRANSFER_DELAY = 1800
-# Ответ при обнаружении телефона
-PHONE_RESPONSE = ""
