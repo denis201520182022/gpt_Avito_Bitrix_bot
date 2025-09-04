@@ -210,3 +210,17 @@ redis-cli flushall # очистить все базы
 ---
 
 
+# Полезные ссылки:
+https://apidocs.bitrix24.ru/api-reference/chat-bots/chats/events/on-imbot-join-chat.html
+
+https://apidocs.bitrix24.ru/api-reference/chat-bots/chats/imbot-chat-leave.html
+
+https://apidocs.bitrix24.ru/api-reference/chats/chat-users/im-chat-user-delete.html
+
+https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/sessions/imopenlines-session-history-get.html
+
+https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/sessions/imopenlines-dialog-get.html
+
+https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/imopenlines-config-get.html
+
+https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/imopenlines-config-add.html
