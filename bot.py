@@ -363,6 +363,22 @@ async def bot_handler(
         if not dialog_id:
             logging.error("Нет dialog_id в запросе")
             return JSONResponse({"status": "error", "message": "Missing dialog_id"}, status_code=400)
+        
+        r = await get_redis()
+        chat_limit = int(await r.get("chat_limit") or 0)
+        chat_count = int(await r.get("chat_count") or 0)
+
+        # Проверяем: это новый диалог?
+        is_new_chat = await r.sadd("counted_dialogs", dialog_id)
+        if is_new_chat:  # Redis вернет 1, если dialog_id впервые
+            chat_count += 1
+            await r.set("chat_count", chat_count)
+
+        # Если лимит превышен -> переводим на оператора
+        if chat_limit > 0 and chat_count > chat_limit:
+            logging.info(f"[Диалог {dialog_id}] Лимит исчерпан, переводим на оператора.")
+            await transfer_to_operator(dialog_id, "limit_reached")
+            return JSONResponse({"status": "limit_reached"})
 
         # Новый фильтр: если сообщение пустое и событие - ONIMBOTMESSAGEADD → переводим на оператора
         if event == "ONIMBOTMESSAGEADD" and (not user_message or not user_message.strip()):

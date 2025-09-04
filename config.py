@@ -39,3 +39,5 @@ HUMANIZE_MODE = os.getenv("HUMANIZE_MODE", "true").lower() == "true"
 OPERATOR_ID = "22"  # или None для любого доступного
 
 PHONE_TRANSFER_DELAY = 1800
+
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
