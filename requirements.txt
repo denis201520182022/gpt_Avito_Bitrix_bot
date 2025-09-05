@@ -8,4 +8,4 @@ redis
 python-dotenv
 
 aiogram
-setuptools
+nest_asyncio

@@ -41,3 +41,9 @@ OPERATOR_ID = "22"  # или None для любого доступного
 PHONE_TRANSFER_DELAY = 1800
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+
+
+# получаем строку из env
+allowed_users_str = os.getenv("ALLOWED_USERS", "")
+# превращаем в список чисел
+ALLOWED_USERS = [int(user_id.strip()) for user_id in allowed_users_str.split(",") if user_id.strip()]

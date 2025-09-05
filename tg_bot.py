@@ -5,14 +5,12 @@ from logging.handlers import RotatingFileHandler
 
 import redis.asyncio as aioredis
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-
+from functools import wraps
 import config
-
 
 # --- Логирование ---
 log_dir = os.path.join(os.getcwd(), "logs")
@@ -31,7 +29,6 @@ logging.basicConfig(
     handlers=[file_handler, logging.StreamHandler()]
 )
 
-
 # --- Redis ---
 async def get_redis():
     return aioredis.Redis(
@@ -41,13 +38,11 @@ async def get_redis():
         decode_responses=True
     )
 
-
 # --- Telegram bot ---
 bot = Bot(token=config.TG_BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-
-# --- Клавиатура под сообщениями ---
+# --- Клавиатуры ---
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📊 Статус")],
@@ -57,6 +52,10 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+cancel_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="❌ Отмена")]],
+    resize_keyboard=True
+)
 
 # --- Инлайн-клавиатура для выбора лимита ---
 def quick_limit_keyboard(mode="set"):
@@ -70,65 +69,144 @@ def quick_limit_keyboard(mode="set"):
         ]
     )
 
+async def monitor_limit():
+    r = await get_redis()
+    while True:
+        try:
+            limit = int(await r.get("chat_limit") or 0)
+            warning_sent = await r.get("limit_warning_sent") == "1"
+
+            if limit <= 15 and not warning_sent:
+                # отправляем уведомления всем разрешённым пользователям
+                for user_id in config.ALLOWED_USERS:
+                    try:
+                        await bot.send_message(user_id, f"⚠️ Осталось всего {limit} лимитов!")
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+                await r.set("limit_warning_sent", "1")  # ставим флаг, чтобы не слать снова
+            elif limit > 15 and warning_sent:
+                # сбрасываем флаг, когда лимит снова больше 15
+                await r.set("limit_warning_sent", "0")
+
+        except Exception as e:
+            logging.error(f"Ошибка при проверке лимита: {e}")
+
+        await asyncio.sleep(3600)  # проверяем каждые 3600 секунд (1 час)
+
 
 # --- FSM ---
 class SetLimit(StatesGroup):
     waiting_for_number = State()
 
-
 class AddLimit(StatesGroup):
     waiting_for_number = State()
 
+from functools import wraps
 
-# --- Статус ---
+def restricted(func):
+    @wraps(func)
+    async def wrapper(message_or_callback, *args, **kwargs):
+        # Проверка для обычных сообщений
+        if isinstance(message_or_callback, types.Message):
+            user_id = message_or_callback.from_user.id
+        # Проверка для inline callback
+        elif isinstance(message_or_callback, types.CallbackQuery):
+            user_id = message_or_callback.from_user.id
+        else:
+            return await func(message_or_callback, *args, **kwargs)
+
+        if user_id not in config.ALLOWED_USERS:
+            if isinstance(message_or_callback, types.Message):
+                await message_or_callback.answer("❌ У вас нет доступа к этому боту.")
+            elif isinstance(message_or_callback, types.CallbackQuery):
+                await message_or_callback.answer("❌ У вас нет доступа к этому боту.", show_alert=True)
+            return
+        return await func(message_or_callback, *args, **kwargs)
+    return wrapper
+
+
+# --- Хендлеры ---
+
+@dp.message(F.text.in_(["/start"]))
+@restricted
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "Привет! Я бот для управления лимитами ИИ бота компании БСК(Avito_Bitrix).\n"
+        "Используйте кнопку ℹ️ Справка или команду /help для получения инструкции",
+        reply_markup=main_kb
+    )
+
 @dp.message(F.text.in_(["📊 Статус", "/status"]))
+@restricted
 async def status(message: types.Message):
     r = await get_redis()
     limit = await r.get("chat_limit") or 0
     count = await r.get("chat_count") or 0
     await message.answer(f"📊 Статус:\nЛимит: {limit}\nИспользовано: {count}", reply_markup=main_kb)
 
-
-# --- Установить лимит ---
 @dp.message(F.text.in_(["⚙️ Установить лимит", "/setlimit"]))
+@restricted
 async def ask_set_limit(message: types.Message, state: FSMContext):
-    await message.answer("Введите новое значение лимита или выберите готовый вариант:", 
-                         reply_markup=quick_limit_keyboard("set"))
+    await message.answer("Введите новое значение лимита или выберите готовый вариант:", reply_markup=quick_limit_keyboard("set"))
+    await message.answer("Для отмены нажмите ❌ Отмена", reply_markup=cancel_kb)
     await state.set_state(SetLimit.waiting_for_number)
 
-
-# --- Обработка числового ответа (установка лимита) ---
 @dp.message(SetLimit.waiting_for_number, F.text.regexp(r"^\d+$"))
+@restricted
 async def process_limit_input(message: types.Message, state: FSMContext):
     number = int(message.text)
     r = await get_redis()
+    
+    # Устанавливаем новый лимит и сбрасываем счетчик использования
     await r.set("chat_limit", number)
     await r.set("chat_count", 0)
+
+    # Сбрасываем флаг предупреждения, если лимит теперь больше 15
+    if number > 15:
+        await r.set("limit_warning_sent", "0")
+    
     await message.answer(f"✅ Лимит установлен: {number}", reply_markup=main_kb)
     await state.clear()
 
 
-# --- Добавить к лимиту ---
 @dp.message(F.text.in_(["➕ Добавить к лимиту", "/add"]))
+@restricted
 async def ask_add_limit(message: types.Message, state: FSMContext):
-    await message.answer("Введите число для добавления или выберите готовый вариант:", 
-                         reply_markup=quick_limit_keyboard("add"))
+    await message.answer("Введите число для добавления или выберите готовый вариант:", reply_markup=quick_limit_keyboard("add"))
+    await message.answer("Для отмены нажмите ❌ Отмена", reply_markup=cancel_kb)
     await state.set_state(AddLimit.waiting_for_number)
 
-
 @dp.message(AddLimit.waiting_for_number, F.text.regexp(r"^\d+$"))
+@restricted
 async def process_add_limit(message: types.Message, state: FSMContext):
     number = int(message.text)
     r = await get_redis()
     current = int(await r.get("chat_limit") or 0)
     new_limit = current + number
+
+    # Устанавливаем новый лимит
     await r.set("chat_limit", new_limit)
+
+    # Сбрасываем флаг предупреждения, если лимит теперь больше 15
+    if new_limit > 15:
+        await r.set("limit_warning_sent", "0")
+
     await message.answer(f"➕ Лимит увеличен: +{number}, новый={new_limit}", reply_markup=main_kb)
     await state.clear()
 
 
-# --- Обработка инлайн-кнопок ---
+@dp.message(F.text.in_(["❌ Отмена"]))
+@restricted
+async def cancel_fsm(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активного действия.", reply_markup=main_kb)
+        return
+    await state.clear()
+    await message.answer("Действие отменено.", reply_markup=main_kb)
+
 @dp.callback_query(F.data.regexp(r"^(set|add)_limit:(\d+)$"))
+@restricted
 async def inline_limit_handler(callback: types.CallbackQuery, state: FSMContext):
     mode, value = callback.data.split("_limit:")
     value = int(value)
@@ -139,18 +217,17 @@ async def inline_limit_handler(callback: types.CallbackQuery, state: FSMContext)
         await r.set("chat_count", 0)
         await callback.message.answer(f"✅ Лимит установлен: {value}", reply_markup=main_kb)
         await state.clear()
-    else:  # add
+    else:
         current = int(await r.get("chat_limit") or 0)
         new_limit = current + value
         await r.set("chat_limit", new_limit)
         await callback.message.answer(f"➕ Лимит увеличен: +{value}, новый={new_limit}", reply_markup=main_kb)
         await state.clear()
 
-    await callback.answer()  # убирает "часики"
+    await callback.answer()
 
-
-# --- Справка ---
 @dp.message(F.text.in_(["ℹ️ Справка", "/help"]))
+@restricted
 async def help_cmd(message: types.Message):
     text = (
         "ℹ️ Доступные команды:\n"
@@ -163,7 +240,6 @@ async def help_cmd(message: types.Message):
     await message.answer(text, reply_markup=main_kb)
 
 
-# --- Настройка меню команд ---
 async def set_commands():
     commands = [
         types.BotCommand(command="status", description="Показать статус"),
@@ -173,12 +249,15 @@ async def set_commands():
     ]
     await bot.set_my_commands(commands)
 
-
+# --- Запуск бота через поллинг ---
 async def main():
-    logging.info("[TG BOT] Запуск Telegram-бота")
     await set_commands()
-    await dp.start_polling(bot)
+    logging.info("Запуск бота через поллинг")
 
+    # запускаем фоновую задачу
+    asyncio.create_task(monitor_limit())
+
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
