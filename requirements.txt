@@ -6,4 +6,6 @@ httpx
 openai
 redis
 python-dotenv
+
 aiogram
+setuptools
