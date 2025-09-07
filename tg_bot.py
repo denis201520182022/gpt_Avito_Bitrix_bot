@@ -74,25 +74,27 @@ async def monitor_limit():
     while True:
         try:
             limit = int(await r.get("chat_limit") or 0)
+            count = int(await r.get("chat_count") or 0)
+            remaining = max(0, limit - count) if limit > 0 else float('inf')
+            
             warning_sent = await r.get("limit_warning_sent") == "1"
 
-            if limit <= 15 and not warning_sent:
+            if limit > 0 and remaining <= 15 and not warning_sent:
                 # отправляем уведомления всем разрешённым пользователям
                 for user_id in config.ALLOWED_USERS:
                     try:
-                        await bot.send_message(user_id, f"⚠️ Осталось всего {limit} лимитов!")
+                        await bot.send_message(user_id, f"⚠️ Осталось всего {remaining} лимитов из {limit}!")
                     except Exception as e:
                         logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
-                await r.set("limit_warning_sent", "1")  # ставим флаг, чтобы не слать снова
-            elif limit > 15 and warning_sent:
+                await r.set("limit_warning_sent", "1")
+            elif remaining > 15 and warning_sent:
                 # сбрасываем флаг, когда лимит снова больше 15
                 await r.set("limit_warning_sent", "0")
 
         except Exception as e:
             logging.error(f"Ошибка при проверке лимита: {e}")
 
-        await asyncio.sleep(3600)  # проверяем каждые 3600 секунд (1 час)
-
+        await asyncio.sleep(3600)
 
 # --- FSM ---
 class SetLimit(StatesGroup):
@@ -157,11 +159,12 @@ async def process_limit_input(message: types.Message, state: FSMContext):
     number = int(message.text)
     r = await get_redis()
     
-    # Устанавливаем новый лимит и сбрасываем счетчик использования
+    # Устанавливаем новый лимит и сбрасываем счетчики
     await r.set("chat_limit", number)
     await r.set("chat_count", 0)
-
-    # Сбрасываем флаг предупреждения, если лимит теперь больше 15
+    
+    
+    # Сбрасываем флаги уведомлений
     if number > 15:
         await r.set("limit_warning_sent", "0")
     
@@ -215,6 +218,7 @@ async def inline_limit_handler(callback: types.CallbackQuery, state: FSMContext)
     if mode == "set":
         await r.set("chat_limit", value)
         await r.set("chat_count", 0)
+        
         await callback.message.answer(f"✅ Лимит установлен: {value}", reply_markup=main_kb)
         await state.clear()
     else:

@@ -365,53 +365,74 @@ async def bot_handler(
             return JSONResponse({"status": "error", "message": "Missing dialog_id"}, status_code=400)
         
         r = await get_redis()
+        
+        # Получаем текущие значения лимитов
         chat_limit = int(await r.get("chat_limit") or 0)
         chat_count = int(await r.get("chat_count") or 0)
+        
+        logging.info(f"[Диалог {dialog_id}] Текущий лимит: {chat_limit}, использовано: {chat_count}")
 
         # Проверяем: это новый диалог?
         is_new_chat = await r.sadd("counted_dialogs", dialog_id)
-        if is_new_chat:  # Redis вернет 1, если dialog_id впервые
+        
+        if is_new_chat:  # Redis вернет 1, если dialog_id добавлен впервые
             chat_count += 1
             await r.set("chat_count", chat_count)
+            logging.info(f"[Диалог {dialog_id}] Новый диалог! Обновили счетчик: {chat_count}")
+        else:
+            logging.info(f"[Диалог {dialog_id}] Существующий диалог, счетчик не изменяется")
 
-        # Если лимит превышен -> переводим на оператора
+        # ГЛАВНАЯ ПРОВЕРКА: если установлен лимит и он превышен
         if chat_limit > 0 and chat_count > chat_limit:
-            logging.info(f"[Диалог {dialog_id}] Лимит исчерпан, переводим на оператора.")
-            await transfer_to_operator(dialog_id, "limit_reached")
-            return JSONResponse({"status": "limit_reached"})
+            logging.info(f"[Диалог {dialog_id}] Лимит исчерпан ({chat_count}/{chat_limit}), переводим на оператора.")
+            transfer_success = await transfer_to_operator(dialog_id, "limit_reached")
+            if transfer_success:
+                return JSONResponse({"status": "limit_reached", "message": "Диалог переведен на оператора - лимит исчерпан"})
+            else:
+                logging.error(f"[Диалог {dialog_id}] Не удалось перевести на оператора при превышении лимита")
+                return JSONResponse({"status": "transfer_failed", "message": "Не удалось перевести на оператора"})
 
-        # Новый фильтр: если сообщение пустое и событие - ONIMBOTMESSAGEADD → переводим на оператора
+        # Если лимит равен 0, бот работает без ограничений
+        if chat_limit == 0:
+            logging.info(f"[Диалог {dialog_id}] Лимиты не установлены, бот работает без ограничений")
+
+        # Фильтр на пустые сообщения
         if event == "ONIMBOTMESSAGEADD" and (not user_message or not user_message.strip()):
             logging.info(f"[Диалог {dialog_id}] Получено пустое сообщение (ONIMBOTMESSAGEADD), переводим на оператора.")
             transfer_success = await transfer_to_operator(dialog_id, "empty_message")
             if transfer_success:
-                return JSONResponse({"status": "transferred_to_operator"})
+                return JSONResponse({"status": "transferred_to_operator", "message": "Пустое сообщение - переведено на оператора"})
             else:
-                return JSONResponse({"status": "transfer_failed"})
+                return JSONResponse({"status": "transfer_failed", "message": "Не удалось перевести на оператора"})
 
-        # ФИЛЬТР 3: Отложенный перевод при обнаружении номера телефона
+        # Отложенный перевод при обнаружении номера телефона
         if has_phone_number(user_message):
             logging.info(f"[Диалог {dialog_id}] Обнаружен номер телефона. Продолжаем диалог и планируем отложенный перевод.")
-            # Планируем отложенный перевод на оператора
             async with transfer_tasks_lock:
                 if dialog_id not in transfer_tasks or transfer_tasks[dialog_id].done():
                     logging.info(f"[Диалог {dialog_id}] Создаем новую задачу отложенного перевода.")
                     transfer_tasks[dialog_id] = asyncio.create_task(schedule_transfer(dialog_id))
                 else:
                     logging.info(f"[Диалог {dialog_id}] Отложенный перевод уже запланирован. Пропускаем.")
-            # Сообщение продолжает обрабатываться GPT, как обычный текст
         
-        # Обработка всех остальных сообщений
-        r = await get_redis()
+        # Обработка обычных сообщений через GPT
         await r.rpush(f"pending:{dialog_id}", user_message.strip())
         await ensure_worker_running(dialog_id, user_name or "клиент")
 
-        return JSONResponse({"status": "queued"})
+        return JSONResponse({
+            "status": "queued", 
+            "message": "Сообщение добавлено в очередь на обработку",
+            "limits": {
+                "current_limit": chat_limit,
+                "used": chat_count,
+                "remaining": max(0, chat_limit - chat_count) if chat_limit > 0 else "unlimited"
+            }
+        })
         
     except Exception as e:
         logging.error(f"Ошибка в bot_handler: {e}", exc_info=True)
         return JSONResponse({"status": "error", "message": "Internal server error"}, status_code=500)
-
+    
 # Эндпоинты для мониторинга
 @app.get("/status")
 async def status():

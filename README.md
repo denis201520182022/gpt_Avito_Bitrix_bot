@@ -137,6 +137,8 @@ tail -f logs/bot.log
 sudo systemctl status
 # журнал службы в реальном времени
 journalctl -u avito-bot.service -f
+sudo journalctl -u tg_bot.service -f
+
 
 ```
 
@@ -159,6 +161,7 @@ sudo systemctl status gpt-bot
 
 # Проверьте логи
 tail -f logs/bot.log
+
 
 # Проверьте Redis
 redis-cli ping
@@ -202,10 +205,12 @@ redis-cli flushall # очистить все базы
 3. Перезапустить службу:
             ```bash
             sudo systemctl restart avito-bot.service
+            sudo systemctl restart tg_bot.service
             ```
 4. Проверить статус:
             ```bash
             sudo systemctl status avito-bot.service
+            sudo systemctl status tg_bot.service
             ```
 ---
 
@@ -224,3 +229,20 @@ https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/sessions/imopenl
 https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/imopenlines-config-get.html
 
 https://apidocs.bitrix24.ru/api-reference/imopenlines/openlines/imopenlines-config-add.html
+
+
+[Unit]
+Description=Avito Bitrix Telegram Bot
+After=network.target redis-server.service
+Requires=redis-server.service
+
+[Service]
+User=root
+WorkingDirectory=/var/local/Bot_Avito_Bitrix/gpt_Avito_Bitrix_bot
+ExecStart=/var/local/Bot_Avito_Bitrix/gpt_Avito_Bitrix_bot/venv/bin/python3 /var/local/Bot_Avito_Bitrix/gpt_Avito_Bitrix_bot/tg_bot.py
+Restart=always
+RestartSec=5
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=multi-user.target
