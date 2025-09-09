@@ -57,6 +57,13 @@ cancel_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+client_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📊 Статус")]
+    ],
+    resize_keyboard=True
+)
+
 # --- Инлайн-клавиатура для выбора лимита ---
 def quick_limit_keyboard(mode="set"):
     return InlineKeyboardMarkup(
@@ -80,13 +87,20 @@ async def monitor_limit():
             warning_sent = await r.get("limit_warning_sent") == "1"
 
             if limit > 0 and remaining <= 15 and not warning_sent:
-                # отправляем уведомления всем разрешённым пользователям
+                # уведомления админам
                 for user_id in config.ALLOWED_USERS:
                     try:
                         await bot.send_message(user_id, f"⚠️ Осталось всего {remaining} лимитов из {limit}!")
                     except Exception as e:
                         logging.warning(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+                # уведомления клиентам
+                for client_id in config.CLIENT_USERS:
+                    try:
+                        await bot.send_message(client_id, f"⚠️ Осталось всего {remaining} лимитов из {limit}!")
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить уведомление клиенту {client_id}: {e}")
                 await r.set("limit_warning_sent", "1")
+                
             elif remaining > 15 and warning_sent:
                 # сбрасываем флаг, когда лимит снова больше 15
                 await r.set("limit_warning_sent", "0")
@@ -103,7 +117,6 @@ class SetLimit(StatesGroup):
 class AddLimit(StatesGroup):
     waiting_for_number = State()
 
-from functools import wraps
 
 def restricted(func):
     @wraps(func)
@@ -126,25 +139,65 @@ def restricted(func):
         return await func(message_or_callback, *args, **kwargs)
     return wrapper
 
+def client_only(func):
+    @wraps(func)
+    async def wrapper(message_or_callback, *args, **kwargs):
+        if isinstance(message_or_callback, types.Message):
+            user_id = message_or_callback.from_user.id
+        elif isinstance(message_or_callback, types.CallbackQuery):
+            user_id = message_or_callback.from_user.id
+        else:
+            return await func(message_or_callback, *args, **kwargs)
+
+        if user_id not in CLIENT_USERS:
+            if isinstance(message_or_callback, types.Message):
+                await message_or_callback.answer("❌ У вас нет доступа к этой команде.")
+            elif isinstance(message_or_callback, types.CallbackQuery):
+                await message_or_callback.answer("❌ У вас нет доступа к этой команде.", show_alert=True)
+            return
+        return await func(message_or_callback, *args, **kwargs)
+    return wrapper
+
+def allowed_for_status(func):
+    @wraps(func)
+    async def wrapper(message: types.Message, *args, **kwargs):
+        user_id = message.from_user.id
+        if user_id not in config.ALLOWED_USERS + config.CLIENT_USERS:
+            await message.answer("❌ У вас нет доступа к этой команде.")
+            return
+        return await func(message, *args, **kwargs)
+    return wrapper
+
 
 # --- Хендлеры ---
 
 @dp.message(F.text.in_(["/start"]))
-@restricted
 async def cmd_start(message: types.Message):
-    await message.answer(
-        "Привет! Я бот для управления лимитами ИИ бота компании БСК(Avito_Bitrix).\n"
-        "Используйте кнопку ℹ️ Справка или команду /help для получения инструкции",
-        reply_markup=main_kb
-    )
+    user_id = message.from_user.id
+    if user_id in config.ALLOWED_USERS:
+        kb = main_kb
+        text = "Привет! Я бот для управления лимитами ИИ бота компании БСК."
+    elif user_id in config.CLIENT_USERS:
+        kb = client_kb
+        text = "Привет! Вы можете просматривать статус лимитов."
+    else:
+        await message.answer("❌ У вас нет доступа к этому боту.")
+        return
+
+    await message.answer(text, reply_markup=kb)
+
 
 @dp.message(F.text.in_(["📊 Статус", "/status"]))
-@restricted
+@allowed_for_status
 async def status(message: types.Message):
     r = await get_redis()
     limit = await r.get("chat_limit") or 0
     count = await r.get("chat_count") or 0
-    await message.answer(f"📊 Статус:\nЛимит: {limit}\nИспользовано: {count}", reply_markup=main_kb)
+    await message.answer(
+    f"📊 Статус:\nЛимит: {limit}\nИспользовано: {count}\nОсталось: {int(limit) - int(count)}",
+                reply_markup=main_kb if message.from_user.id in  else client_kb
+    )
+
 
 @dp.message(F.text.in_(["⚙️ Установить лимит", "/setlimit"]))
 @restricted
